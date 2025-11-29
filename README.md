@@ -9,8 +9,11 @@ lid-driven cavity at \(Re = 100\). The solution is obtained
 using a finite-volume SIMPLE algorithm with line-by-line TDMA.
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
 
 
 >>>>>>> 2dbd603 (README)
+=======
+>>>>>>> 9270c4a (Resolved conflicts.)
 ![u-velocity](media/u-velocity.png)
