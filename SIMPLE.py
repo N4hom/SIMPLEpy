@@ -5,7 +5,9 @@ import math
 import matplotlib.pyplot as plt
 import numpy as np
 
+from grid import Grid2D
 from variable import variable, coeff
+from assembleMatrix import LineByLineSolver
 
 
 debugging = False
@@ -16,7 +18,8 @@ debugging = False
 # ---------------------------------------------------------------------------
 
 def power(a: float, n: int) -> float:
-    """Integer power with a simple loop."""
+    """Avoid python native **"""
+    """Much faster           """
     tmp = 1.0
     for _ in range(n):
         tmp *= a
@@ -24,30 +27,10 @@ def power(a: float, n: int) -> float:
 
 
 def A(P: float) -> float:
-    """QUICK-like blending function used in the original code."""
+    """QUICK-like blending function."""
     return max(0.0, power((1.0 - 0.1 * abs(P)), 5))
 
 
-# ---------------------------------------------------------------------------
-# Core data structures
-# ---------------------------------------------------------------------------
-
-class Grid2D:
-    """
-    Simple 2D uniform grid for the lid-driven cavity.
-
-    It stores the number of control volumes for the *pressure* field.
-    Staggered u and v velocities use (Nx-1, Ny) and (Nx, Ny-1) respectively.
-    """
-
-    def __init__(self, Nx: int, Ny: int, Lx: float, Ly: float) -> None:
-        self.Nx = Nx
-        self.Ny = Ny
-        self.Lx = Lx
-        self.Ly = Ly
-
-        self.Deltax = Lx / Nx
-        self.Deltay = Ly / Ny
 
 
 class FluidProperties:
@@ -124,6 +107,11 @@ class SimpleLidDrivenCavity:
         self.pCorr.initialize()
         self.u.initialize()
         self.v.initialize()
+
+        # Defined line-by-line solvers for each field
+        self.uSolver = LineByLineSolver(self.u)
+        self.vSolver = LineByLineSolver(self.v)
+        self.pCorrSolver = LineByLineSolver(self.pCorr)
 
     # ------------------------------------------------------------------
     # Assembly routines (momentum + pressure correction)
@@ -449,25 +437,25 @@ class SimpleLidDrivenCavity:
     # SIMPLE loop
     # ------------------------------------------------------------------
     def iterate(self) -> None:
-        """Perform one SIMPLE iteration: assemble → solve → correct."""
         # Assemble momentum equations
         self.assemble_u_momentum()
         self.assemble_v_momentum()
 
-        # Solve momentum with line-by-line sweeps
-        self.u.sweepWestToEast()
-        self.u.sweepSouthToNorth()
-        self.u.sweepEastToWest()
+        # Solve momentum using line-by-line solvers
+        self.uSolver.sweepWestToEast()
+        self.uSolver.sweepSouthToNorth()
+        self.uSolver.sweepEastToWest()
 
-        self.v.sweepWestToEast()
-        self.v.sweepSouthToNorth()
-        self.v.sweepEastToWest()
+        self.vSolver.sweepWestToEast()
+        self.vSolver.sweepSouthToNorth()
+        self.vSolver.sweepEastToWest()
 
         # Assemble and solve pressure-correction
         self.assemble_p_correction()
-        self.pCorr.sweepWestToEast()
-        self.pCorr.sweepSouthToNorth()
-        self.pCorr.sweepEastToWest()
+
+        self.pCorrSolver.sweepWestToEast()
+        self.pCorrSolver.sweepSouthToNorth()
+        self.pCorrSolver.sweepEastToWest()
 
         # Correct fields
         self.correct_u()
@@ -495,35 +483,14 @@ class SimpleLidDrivenCavity:
                 f"v_res={self._velocity_residual('v'):.3e})"
             )
         return max_iterations
-
-
-# ---------------------------------------------------------------------------
-# Post-processing / plotting
-# ---------------------------------------------------------------------------
-
-class PostProcessor:
-    """
-    Handles all visualization for a SIMPLE lid-driven cavity simulation.
-
-    It takes a converged SimpleLidDrivenCavity instance and provides
-    contour plots for u, v, p, and |U|.
-    """
-
-    def __init__(self, solver: SimpleLidDrivenCavity) -> None:
-        self.solver = solver
-
-    def _build_grid_for_field(self, field: np.ndarray):
-        """Construct a uniform (X, Y) mesh that matches `field.shape`."""
-        ny, nx = field.shape
-        x = np.linspace(0.0, self.solver.grid.Lx, nx)
-        y = np.linspace(0.0, self.solver.grid.Ly, ny)
-        X, Y = np.meshgrid(x, y)
-        return X, Y
-
+    
     def contour_u(self) -> None:
-        X, Y = self._build_grid_for_field(self.solver.u.field)
+        ny, nx = self.u.field.shape
+        x = np.linspace(0.0, self.grid.Lx, nx)
+        y = np.linspace(0.0, self.grid.Ly, ny)
+        X, Y = np.meshgrid(x, y)
         plt.figure()
-        cs = plt.contourf(Y, X, self.solver.u.field, levels=50, cmap="plasma")
+        cs = plt.contourf(Y, X, self.u.field, levels=50, cmap="plasma")
         plt.colorbar(cs, label="u (m/s)")
         plt.title("u-velocity")
         plt.xlabel("x (m)")
@@ -532,64 +499,7 @@ class PostProcessor:
         plt.tight_layout()
         plt.show()
 
-    def contour_v(self) -> None:
-        X, Y = self._build_grid_for_field(self.solver.v.field)
-        plt.figure()
-        cs = plt.contourf(X, Y, self.solver.v.field, levels=50, cmap="plasma")
-        plt.colorbar(cs, label="v (m/s)")
-        plt.title("v-velocity")
-        plt.xlabel("x (m)")
-        plt.ylabel("y (m)")
-        plt.axis("equal")
-        plt.tight_layout()
-        plt.show()
 
-    def contour_p(self) -> None:
-        X, Y = self._build_grid_for_field(self.solver.p.field)
-        plt.figure()
-        cs = plt.contourf(X, Y, self.solver.p.field, levels=50, cmap="plasma")
-        plt.colorbar(cs, label="p (Pa)")
-        plt.title("Pressure")
-        plt.xlabel("x (m)")
-        plt.ylabel("y (m)")
-        plt.axis("equal")
-        plt.tight_layout()
-        plt.show()
-
-    def contour_speed(self) -> None:
-        """Contour of |U| on a cell-centred grid from staggered u and v."""
-        # interior pieces (ignore ghost cells)
-        u_int = self.solver.u.field[1:-1, 1:-1]
-        v_int = self.solver.v.field[1:-1, 1:-1]
-
-        ny = min(u_int.shape[0], v_int.shape[0])
-        nx = min(u_int.shape[1], v_int.shape[1])
-        u_int = u_int[:ny, :nx]
-        v_int = v_int[:ny, :nx]
-
-        speed = np.sqrt(u_int ** 2 + v_int ** 2)
-
-        x = np.linspace(
-            self.solver.grid.Deltax * 0.5,
-            self.solver.grid.Lx - self.solver.grid.Deltax * 0.5,
-            nx,
-        )
-        y = np.linspace(
-            self.solver.grid.Deltay * 0.5,
-            self.solver.grid.Ly - self.solver.grid.Deltay * 0.5,
-            ny,
-        )
-        Y, X = np.meshgrid(x, y)
-
-        plt.figure()
-        cs = plt.contourf(Y, X, speed, levels=50, cmap="plasma")
-        plt.colorbar(cs, label="|U| (m/s)")
-        plt.title("Velocity magnitude")
-        plt.xlabel("x (m)")
-        plt.ylabel("y (m)")
-        plt.axis("equal")
-        plt.tight_layout()
-        plt.show()
 
 
 # ---------------------------------------------------------------------------
@@ -597,6 +507,9 @@ class PostProcessor:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+
+    import postProcess
+    
     cavity = SimpleLidDrivenCavity(
         Nx=20,
         Ny=20,
@@ -607,10 +520,9 @@ if __name__ == "__main__":
         Re=100.0,
     )
 
+    cavity.contour_u()
+
     cavity.run(max_iterations=10000, verbose=True)
 
-    post = PostProcessor(cavity)
-    post.contour_u()
-    # post.contour_v()
-    # post.contour_p()
-    # post.contour_speed()
+    cavity.contour_u()
+    
